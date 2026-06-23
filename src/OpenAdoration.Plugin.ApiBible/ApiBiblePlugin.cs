@@ -54,16 +54,17 @@ public sealed class ApiBiblePlugin : IBibleSourcePlugin
     {
         var version = ApiBibleParser.ParseVersion(await GetAsync($"bibles/{versionId}", ct), versionId);
         var apiBooks = ApiBibleParser.ParseBooks(await GetAsync($"bibles/{versionId}/books", ct));
+        _log?.LogInformation("API.Bible: starting fetch of {Version} ({Books} books)", version.Name, apiBooks.Count);
 
         var books = new List<PluginBibleBook>();
         var verses = new List<PluginBibleVerse>();
         var number = 0;
-        var fetched = 0;
 
         foreach (var b in apiBooks)
         {
             ct.ThrowIfCancellationRequested();
             number++;
+            var bookStart = verses.Count;
 
             var chapters = ApiBibleParser
                 .ParseChapterRefs(await GetAsync($"bibles/{versionId}/books/{b.Code}/chapters", ct))
@@ -80,8 +81,7 @@ public sealed class ApiBiblePlugin : IBibleSourcePlugin
                     "&include-notes=false&include-titles=false&include-chapter-numbers=false&include-verse-spans=false",
                     ct);
                 verses.AddRange(ApiBibleParser.ParseChapterVerses(chapterJson, b.Name));
-                fetched = verses.Count;
-                progress?.Report(fetched);
+                progress?.Report(verses.Count);
                 ReportFums(chapterJson);
             }
 
@@ -89,8 +89,12 @@ public sealed class ApiBiblePlugin : IBibleSourcePlugin
                 b.Name, b.Abbreviation, number,
                 NewTestament.Contains(b.Code) ? PluginTestament.New : PluginTestament.Old,
                 chapters.Count));
+            _log?.LogInformation("API.Bible: {Book} — {Chapters} chapters, {Verses} verses (total {Total})",
+                b.Name, chapters.Count, verses.Count - bookStart, verses.Count);
         }
 
+        _log?.LogInformation("API.Bible: finished {Version} — {Books} books, {Verses} verses",
+            version.Name, books.Count, verses.Count);
         return new PluginBibleData(version, books, verses);
     }
 
@@ -105,9 +109,13 @@ public sealed class ApiBiblePlugin : IBibleSourcePlugin
             using var resp = await http.GetAsync(relativeUrl, ct);
             if (resp.StatusCode == HttpStatusCode.TooManyRequests && attempt < 3)
             {
-                await Task.Delay(resp.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(5), ct);
+                var wait = resp.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(5);
+                _log?.LogWarning("API.Bible: 429 rate-limited on {Url}; retrying in {Wait}s", relativeUrl, wait.TotalSeconds);
+                await Task.Delay(wait, ct);
                 continue;
             }
+            if (!resp.IsSuccessStatusCode)
+                _log?.LogError("API.Bible: {Status} on {Url}", (int)resp.StatusCode, relativeUrl);
             resp.EnsureSuccessStatusCode();
             return await resp.Content.ReadAsStringAsync(ct);
         }
