@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>OpenAdoration.Plugin.ApiBible</AssemblyName>
+    <!-- This assembly is loaded into the host's plugin ALC; resolves deps from its own dir. -->
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+  </PropertyGroup>
+
+  <!-- Contract + framework deps are COMPILE-TIME ONLY (Private=false): the host shares them
+       from its default load context (PluginLoadContext), so shipping our own copies would
+       split the IPlugin/ILogger type identity. The .oaplugin therefore contains just this DLL
+       + manifest.json. -->
+  <ItemGroup>
+    <Reference Include="OpenAdoration.Plugins.Abstractions">
+      <HintPath>..\..\lib\OpenAdoration.Plugins.Abstractions.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.4">
+      <Private>false</Private>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="manifest.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

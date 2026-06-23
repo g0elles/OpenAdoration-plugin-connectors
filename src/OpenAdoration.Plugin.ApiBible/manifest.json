@@ -1,0 +1,11 @@
+{
+  "id": "apibible",
+  "name": "API.Bible Source",
+  "version": "0.1.0",
+  "capability": "bible-source",
+  "minOaVersion": "2.0.0",
+  "entryAssembly": "OpenAdoration.Plugin.ApiBible.dll",
+  "settings": [
+    { "key": "apiKey", "label": "API.Bible key", "secret": true }
+  ]
+}
