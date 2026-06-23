@@ -1,6 +1,6 @@
 # OpenAdoration plugins
 
-[![ci](https://github.com/g0elles/OpenAdoration-apibible/actions/workflows/ci.yml/badge.svg)](https://github.com/g0elles/OpenAdoration-apibible/actions/workflows/ci.yml)
+[![ci](https://github.com/g0elles/OpenAdoration-plugin-connectors/actions/workflows/ci.yml/badge.svg)](https://github.com/g0elles/OpenAdoration-plugin-connectors/actions/workflows/ci.yml)
 
 Bible-source plugins for [OpenAdoration](https://github.com/g0elles/OpenAdoration). Each is a separate
 project here but shares the `OpenAdoration.Plugins.Abstractions` contract; the core app stays MIT and
