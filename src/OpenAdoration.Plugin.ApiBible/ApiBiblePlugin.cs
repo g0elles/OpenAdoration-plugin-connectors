@@ -25,6 +25,13 @@ public sealed class ApiBiblePlugin : IBibleSourcePlugin
     // API.Bible truncates a passage to the first 200 verses (Passage.verseCount == 200 signals it).
     private const int PassageVerseCap = 200;
 
+    // FUMS (Fair Use Management System) reporting host — a SEPARATE host from the scripture API, so
+    // these calls do NOT count against the request quota. Configurable via "fumsBaseUrl".
+    private const string DefaultFumsBase = "https://fums.api.bible/";
+
+    // Max fumsTokens per FUMS GET (repeated &t= params) — keeps the query string well under URL limits.
+    private const int FumsBatchSize = 50;
+
     // 27 USFM codes for the New Testament; everything else is treated as Old Testament.
     private static readonly HashSet<string> NewTestament = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -33,7 +40,9 @@ public sealed class ApiBiblePlugin : IBibleSourcePlugin
     };
 
     private HttpClient? _http;
+    private HttpClient? _fums;
     private ILogger? _log;
+    private string _deviceId = "";
 
     public string Id => "apibible";
     public string Name => "API.Bible Source";
@@ -47,12 +56,22 @@ public sealed class ApiBiblePlugin : IBibleSourcePlugin
             ? b.Trim() : DefaultBaseAddress;
         if (!baseUrl.EndsWith('/')) baseUrl += "/";
 
+        var fumsBase = host.Settings.TryGetValue("fumsBaseUrl", out var f) && !string.IsNullOrWhiteSpace(f)
+            ? f.Trim() : DefaultFumsBase;
+        if (!fumsBase.EndsWith('/')) fumsBase += "/";
+
         _http?.Dispose();
         _http = new HttpClient { BaseAddress = new Uri(baseUrl) };
         if (!string.IsNullOrWhiteSpace(apiKey))
             _http.DefaultRequestHeaders.Add("api-key", apiKey);
         else
             _log?.LogWarning("API.Bible plugin initialized without a key — set one in Settings → Plugins.");
+
+        // FUMS gets its own client (no api-key header). Device id is stable per install without any
+        // persistence: a deterministic hash of machine+user — FUMS only needs an opaque stable id.
+        _fums?.Dispose();
+        _fums = new HttpClient { BaseAddress = new Uri(fumsBase) };
+        _deviceId = StableDeviceId();
     }
 
     public async Task<IReadOnlyList<PluginBibleVersionInfo>> GetAvailableVersionsAsync(CancellationToken ct = default) =>
@@ -75,12 +94,19 @@ public sealed class ApiBiblePlugin : IBibleSourcePlugin
             NewTestament.Contains(b.Book.Code) ? PluginTestament.New : PluginTestament.Old,
             b.Chapters.Count)).ToList();
 
+        // Collect every response's FUMS token and report them once at the end (per the fair-use docs:
+        // report the token from each scripture access; batchable). FUMS hits a separate host, so it
+        // doesn't consume the request quota.
+        var fumsTokens = new List<string>();
+        void Collect(string json) { var t = ExtractFumsToken(json); if (t is not null) fumsTokens.Add(t); }
+
         List<PluginBibleVerse> verses = chapters.Count == 0 ? [] : await WalkAsync(
             chapters, nameByCode,
             (passageId, c) => GetAsync($"bibles/{versionId}/passages/{passageId}?{ContentParams}", c),
             (chapterId, c) => GetAsync($"bibles/{versionId}/chapters/{chapterId}?{ContentParams}", c),
-            ReportFums, progress, ct);
+            Collect, progress, ct);
 
+        await ReportFumsAsync(fumsTokens, ct);
         _log?.LogInformation("API.Bible: finished {Version} — {Books} books, {Verses} verses",
             version.Name, books.Count, verses.Count);
         return new PluginBibleData(version, books, verses);
@@ -164,19 +190,64 @@ public sealed class ApiBiblePlugin : IBibleSourcePlugin
         }
     }
 
-    private void ReportFums(string chapterJson)
+    private static string? ExtractFumsToken(string json)
     {
-        // ponytail: best-effort FUMS — capture API.Bible's Fair-Use token so usage can be reported
-        // per the church's account terms. Full reporting (the FUMS endpoint contract) is account-
-        // specific; logged here so it's never silently dropped. Upgrade path: POST the token once
-        // the church confirms its FUMS reporting endpoint.
         try
         {
-            using var doc = JsonDocument.Parse(chapterJson);
+            using var doc = JsonDocument.Parse(json);
             if (doc.RootElement.TryGetProperty("meta", out var meta) &&
                 meta.TryGetProperty("fumsToken", out var token) && token.ValueKind == JsonValueKind.String)
-                _log?.LogDebug("API.Bible FUMS token: {Token}", token.GetString());
+                return token.GetString();
         }
         catch { /* non-fatal — telemetry must never break an import */ }
+        return null;
+    }
+
+    /// <summary>
+    /// Reports the collected FUMS tokens to API.Bible's Fair-Use system (GET fums.api.bible/f3 with a
+    /// device id, a per-import session id, and the tokens as repeated &amp;t= params, batched). Required
+    /// by the API.Bible terms; best-effort — a reporting failure is logged, never fatal to the import.
+    /// </summary>
+    private async Task ReportFumsAsync(IReadOnlyList<string> tokens, CancellationToken ct)
+    {
+        if (_fums is null || tokens.Count == 0) return;
+        var sessionId = Guid.NewGuid().ToString("N");
+        try
+        {
+            foreach (var url in BuildFumsUrls(tokens, _deviceId, sessionId, FumsBatchSize))
+            {
+                using var resp = await _fums.GetAsync(url, ct);
+                if (!resp.IsSuccessStatusCode)
+                    _log?.LogWarning("API.Bible FUMS: {Status} reporting usage", (int)resp.StatusCode);
+            }
+            _log?.LogInformation("API.Bible FUMS: reported {Count} access tokens", tokens.Count);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _log?.LogWarning(ex, "API.Bible FUMS: usage reporting failed (non-fatal)");
+        }
+    }
+
+    /// <summary>Builds the relative FUMS report URLs, chunking tokens into batches of repeated t= params.</summary>
+    internal static IEnumerable<string> BuildFumsUrls(IReadOnlyList<string> tokens, string deviceId, string sessionId, int batchSize)
+    {
+        for (var i = 0; i < tokens.Count; i += batchSize)
+        {
+            var batch = tokens.Skip(i).Take(batchSize)
+                .Select(t => "t=" + Uri.EscapeDataString(t));
+            yield return $"f3?dId={Uri.EscapeDataString(deviceId)}&sId={Uri.EscapeDataString(sessionId)}&"
+                + string.Join("&", batch);
+        }
+    }
+
+    /// <summary>
+    /// A stable, opaque per-install device id for FUMS, derived from machine + user so it survives
+    /// restarts without any persistence (IPluginHost is read-only). Not PII — a one-way hash.
+    /// </summary>
+    private static string StableDeviceId()
+    {
+        var seed = Environment.MachineName + "|" + Environment.UserName + "|openadoration-apibible";
+        var hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(seed));
+        return new Guid(hash[..16]).ToString("N");
     }
 }
