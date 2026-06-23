@@ -17,6 +17,14 @@ public sealed class ApiBiblePlugin : IBibleSourcePlugin
     // the church's account may be issued a different host.
     private const string DefaultBaseAddress = "https://rest.api.bible/v1/";
 
+    // content-type=json gives explicit verseIds to parse; everything else is noise we strip.
+    private const string ContentParams =
+        "content-type=json&include-notes=false&include-titles=false" +
+        "&include-chapter-numbers=false&include-verse-numbers=false&include-verse-spans=false";
+
+    // API.Bible truncates a passage to the first 200 verses (Passage.verseCount == 200 signals it).
+    private const int PassageVerseCap = 200;
+
     // 27 USFM codes for the New Testament; everything else is treated as Old Testament.
     private static readonly HashSet<string> NewTestament = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -53,49 +61,84 @@ public sealed class ApiBiblePlugin : IBibleSourcePlugin
     public async Task<PluginBibleData> FetchAsync(string versionId, IProgress<int>? progress = null, CancellationToken ct = default)
     {
         var version = ApiBibleParser.ParseVersion(await GetAsync($"bibles/{versionId}", ct), versionId);
-        var apiBooks = ApiBibleParser.ParseBooks(await GetAsync($"bibles/{versionId}/books", ct));
-        _log?.LogInformation("API.Bible: starting fetch of {Version} ({Books} books)", version.Name, apiBooks.Count);
 
-        var books = new List<PluginBibleBook>();
-        var verses = new List<PluginBibleVerse>();
-        var number = 0;
+        // One request returns every book WITH its chapters — replaces the per-book chapter listing.
+        var booksWithChapters = ApiBibleParser.ParseBooksWithChapters(
+            await GetAsync($"bibles/{versionId}/books?include-chapters=true", ct));
+        var chapters = booksWithChapters.SelectMany(b => b.Chapters).ToList();
+        var nameByCode = booksWithChapters.ToDictionary(b => b.Book.Code, b => b.Book.Name);
+        _log?.LogInformation("API.Bible: starting fetch of {Version} ({Books} books, {Chapters} chapters)",
+            version.Name, booksWithChapters.Count, chapters.Count);
 
-        foreach (var b in apiBooks)
-        {
-            ct.ThrowIfCancellationRequested();
-            number++;
-            var bookStart = verses.Count;
+        var books = booksWithChapters.Select((b, i) => new PluginBibleBook(
+            b.Book.Name, b.Book.Abbreviation, i + 1,
+            NewTestament.Contains(b.Book.Code) ? PluginTestament.New : PluginTestament.Old,
+            b.Chapters.Count)).ToList();
 
-            var chapters = ApiBibleParser
-                .ParseChapterRefs(await GetAsync($"bibles/{versionId}/books/{b.Code}/chapters", ct))
-                .Where(c => !string.Equals(c.Number, "intro", StringComparison.OrdinalIgnoreCase))
-                .ToList();
-
-            foreach (var c in chapters)
-            {
-                ct.ThrowIfCancellationRequested();
-                // Per-chapter fetch (not per-verse) keeps a whole-Bible sync under the free-tier
-                // daily request cap. content-type=json gives explicit verseIds to parse.
-                var chapterJson = await GetAsync(
-                    $"bibles/{versionId}/chapters/{c.Id}?content-type=json" +
-                    "&include-notes=false&include-titles=false&include-chapter-numbers=false&include-verse-spans=false",
-                    ct);
-                verses.AddRange(ApiBibleParser.ParseChapterVerses(chapterJson, b.Name));
-                progress?.Report(verses.Count);
-                ReportFums(chapterJson);
-            }
-
-            books.Add(new PluginBibleBook(
-                b.Name, b.Abbreviation, number,
-                NewTestament.Contains(b.Code) ? PluginTestament.New : PluginTestament.Old,
-                chapters.Count));
-            _log?.LogInformation("API.Bible: {Book} — {Chapters} chapters, {Verses} verses (total {Total})",
-                b.Name, chapters.Count, verses.Count - bookStart, verses.Count);
-        }
+        List<PluginBibleVerse> verses = chapters.Count == 0 ? [] : await WalkAsync(
+            chapters, nameByCode,
+            (passageId, c) => GetAsync($"bibles/{versionId}/passages/{passageId}?{ContentParams}", c),
+            (chapterId, c) => GetAsync($"bibles/{versionId}/chapters/{chapterId}?{ContentParams}", c),
+            ReportFums, progress, ct);
 
         _log?.LogInformation("API.Bible: finished {Version} — {Books} books, {Verses} verses",
             version.Name, books.Count, verses.Count);
         return new PluginBibleData(version, books, verses);
+    }
+
+    /// <summary>
+    /// Fetches a whole version's verses in ≤200-verse passages instead of one request per chapter
+    /// (~160 requests vs ~1,250). Walks a cursor through the bible: each passage runs from the cursor
+    /// to the last chapter's verse 1; the API truncates at 200 verses, so on a full window we resume
+    /// just past the last verse returned (a 1-verse overlap, deduped). The final chapter is capped at
+    /// verse 1 by the end marker, so it's fetched in full once at the end. HTTP is injected so the
+    /// walk is unit-testable offline.
+    /// </summary>
+    internal static async Task<List<PluginBibleVerse>> WalkAsync(
+        IReadOnlyList<ApiChapterRef> chapters,
+        IReadOnlyDictionary<string, string> nameByCode,
+        Func<string, CancellationToken, Task<string>> getPassage,
+        Func<string, CancellationToken, Task<string>> getChapter,
+        Action<string>? onFums,
+        IProgress<int>? progress,
+        CancellationToken ct)
+    {
+        var verses = new List<PluginBibleVerse>();
+        var seen = new HashSet<(string, int, int)>();
+        var endMarker = $"{chapters[^1].Id}.1";   // verse 1 always exists — no out-of-range guessing
+        var cursor = $"{chapters[0].Id}.1";
+
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            var json = await getPassage($"{cursor}-{endMarker}", ct);
+            onFums?.Invoke(json);
+            var res = ApiBibleParser.ParsePassageVerses(json, nameByCode);
+            AddNew(res.Verses, verses, seen);
+            progress?.Report(verses.Count);
+
+            // Stop when the API returned fewer than the cap (reached the end marker) or made no
+            // progress; otherwise resume past the last verse this window returned.
+            if (res.VerseCount < PassageVerseCap || res.LastVerseId is null || res.LastVerseId == cursor)
+                break;
+            cursor = res.LastVerseId;
+        }
+
+        // The end marker stopped the walk at the last chapter's verse 1; pull that chapter in full.
+        ct.ThrowIfCancellationRequested();
+        var lastBook = nameByCode.TryGetValue(chapters[^1].BookCode, out var bn) ? bn : chapters[^1].BookCode;
+        var lastJson = await getChapter(chapters[^1].Id, ct);
+        onFums?.Invoke(lastJson);
+        AddNew(ApiBibleParser.ParseChapterVerses(lastJson, lastBook), verses, seen);
+        progress?.Report(verses.Count);
+
+        return verses;
+    }
+
+    private static void AddNew(IReadOnlyList<PluginBibleVerse> incoming, List<PluginBibleVerse> into, HashSet<(string, int, int)> seen)
+    {
+        foreach (var v in incoming)
+            if (seen.Add((v.Book, v.Chapter, v.Verse))) into.Add(v);
     }
 
     private async Task<string> GetAsync(string relativeUrl, CancellationToken ct)

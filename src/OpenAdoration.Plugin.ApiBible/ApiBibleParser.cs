@@ -7,6 +7,19 @@ namespace OpenAdoration.Plugin.ApiBible;
 /// <summary>A book as API.Bible returns it (USFM code + display names).</summary>
 public sealed record ApiBook(string Code, string Name, string Abbreviation);
 
+/// <summary>A chapter ref carrying its owning book code (verseIds are book-prefixed).</summary>
+public sealed record ApiChapterRef(string Id, string BookCode, string Number);
+
+/// <summary>A book together with its (intro-filtered) chapters, from <c>books?include-chapters=true</c>.</summary>
+public sealed record ApiBookWithChapters(ApiBook Book, IReadOnlyList<ApiChapterRef> Chapters);
+
+/// <summary>
+/// One passage response parsed: its verses plus the API.Bible truncation signals. A
+/// <see cref="VerseCount"/> of 200 means the passage was truncated and the walk must continue
+/// from <see cref="LastVerseId"/>.
+/// </summary>
+public sealed record PassageResult(IReadOnlyList<PluginBibleVerse> Verses, int VerseCount, string? LastVerseId);
+
 /// <summary>
 /// Pure JSON → DTO parsing for the API.Bible responses. Network-free so it can be unit-tested
 /// against canned payloads; <see cref="ApiBiblePlugin"/> does the HTTP and calls these.
@@ -24,29 +37,90 @@ public static class ApiBibleParser
         return d is null ? new PluginBibleVersionInfo(fallbackId, fallbackId, fallbackId, "") : ToVersionInfo(d);
     }
 
-    public static IReadOnlyList<ApiBook> ParseBooks(string json) =>
-        Deser<BooksResponse>(json)?.Data?
-            .Select(b => new ApiBook(b.Id, b.Name ?? b.Id, b.Abbreviation ?? b.Id)).ToList() ?? [];
-
-    /// <summary>Chapter (id, number) refs; the caller filters the "intro" pseudo-chapter.</summary>
-    public static IReadOnlyList<(string Id, string Number)> ParseChapterRefs(string json) =>
-        Deser<ChaptersResponse>(json)?.Data?
-            .Select(c => (c.Id, c.Number ?? "")).ToList() ?? [];
+    /// <summary>
+    /// Books with their chapters from <c>books?include-chapters=true</c> — one request replaces the
+    /// per-book chapter listing. The "intro" pseudo-chapter is filtered out.
+    /// </summary>
+    public static IReadOnlyList<ApiBookWithChapters> ParseBooksWithChapters(string json) =>
+        Deser<BooksResponse>(json)?.Data?.Select(b => new ApiBookWithChapters(
+            new ApiBook(b.Id, b.Name ?? b.Id, b.Abbreviation ?? b.Id),
+            (b.Chapters ?? [])
+                .Where(c => !string.Equals(c.Number, "intro", StringComparison.OrdinalIgnoreCase))
+                .Select(c => new ApiChapterRef(c.Id, b.Id, c.Number ?? ""))
+                .ToList())).ToList() ?? [];
 
     /// <summary>
-    /// Extracts verses from a content-type=json chapter response. Every text node carries an
-    /// explicit <c>attrs.verseId</c> (e.g. "GEN.1.1"), so we accumulate text per verseId in order
-    /// — no fragile in-text verse-number delimiter parsing.
+    /// Extracts verses from a content-type=json <b>chapter</b> response. Every text node carries an
+    /// explicit <c>attrs.verseId</c> (e.g. "GEN.1.1"); the book name is supplied by the caller.
     /// </summary>
     public static IReadOnlyList<PluginBibleVerse> ParseChapterVerses(string chapterJson, string bookName)
     {
         using var doc = JsonDocument.Parse(chapterJson);
-        if (!doc.RootElement.TryGetProperty("data", out var data) ||
-            !data.TryGetProperty("content", out var content))
+        if (!doc.RootElement.TryGetProperty("data", out var data))
             return [];
 
-        // API.Bible types `content` as a string but returns a native node array for content-type=json.
-        // Handle both: if it arrived JSON-encoded as a string, parse it again.
+        var (order, acc) = CollectContent(data);
+        var verses = new List<PluginBibleVerse>();
+        foreach (var id in order)
+        {
+            if (!TrySplitVerseId(id, out _, out var chapter, out var verse)) continue;
+            var text = acc[id].ToString().Trim();
+            if (text.Length > 0) verses.Add(new PluginBibleVerse(bookName, chapter, verse, text));
+        }
+        return verses;
+    }
+
+    /// <summary>
+    /// Extracts verses from a content-type=json <b>passage</b> response. A passage can span books, so
+    /// the book name is resolved per verse from the verseId's book code via <paramref name="nameByCode"/>.
+    /// Also surfaces the passage's <c>verseCount</c> (truncation flag) and last verseId (walk cursor).
+    /// </summary>
+    public static PassageResult ParsePassageVerses(string passageJson, IReadOnlyDictionary<string, string> nameByCode)
+    {
+        using var doc = JsonDocument.Parse(passageJson);
+        if (!doc.RootElement.TryGetProperty("data", out var data))
+            return new PassageResult([], 0, null);
+
+        var verseCount = data.TryGetProperty("verseCount", out var vc) && vc.ValueKind == JsonValueKind.Number
+            ? vc.GetInt32() : 0;
+
+        var (order, acc) = CollectContent(data);
+        var verses = new List<PluginBibleVerse>();
+        string? lastId = null;
+        foreach (var id in order)
+        {
+            if (!TrySplitVerseId(id, out var code, out var chapter, out var verse)) continue;
+            lastId = id; // advance the cursor even if the verse text is empty
+            var name = nameByCode.TryGetValue(code, out var n) ? n : code;
+            var text = acc[id].ToString().Trim();
+            if (text.Length > 0) verses.Add(new PluginBibleVerse(name, chapter, verse, text));
+        }
+        return new PassageResult(verses, verseCount, lastId);
+    }
+
+    /// <summary>verseId "1CO.16.1" → ("1CO", 16, 1). Book codes never contain '.'.</summary>
+    private static bool TrySplitVerseId(string id, out string bookCode, out int chapter, out int verse)
+    {
+        bookCode = ""; chapter = 0; verse = 0;
+        var parts = id.Split('.');
+        if (parts.Length < 3 || !int.TryParse(parts[^2], out chapter) || !int.TryParse(parts[^1], out verse))
+            return false;
+        bookCode = parts[0];
+        return true;
+    }
+
+    /// <summary>
+    /// Walks a content node tree (from a chapter or passage <c>data.content</c>), accumulating text per
+    /// verseId in document order. API.Bible types <c>content</c> as a string but returns a native node
+    /// array for content-type=json; handle both.
+    /// </summary>
+    private static (List<string> Order, Dictionary<string, StringBuilder> Acc) CollectContent(JsonElement data)
+    {
+        var acc = new Dictionary<string, StringBuilder>();
+        var order = new List<string>();
+        if (!data.TryGetProperty("content", out var content))
+            return (order, acc);
+
         JsonDocument? inner = null;
         try
         {
@@ -55,24 +129,10 @@ public static class ApiBibleParser
                 inner = JsonDocument.Parse(content.GetString() ?? "[]");
                 content = inner.RootElement;
             }
-
-            var acc = new Dictionary<string, StringBuilder>();
-            var order = new List<string>();
             Collect(content, acc, order);
-
-            var verses = new List<PluginBibleVerse>();
-            foreach (var id in order)
-            {
-                var parts = id.Split('.');
-                if (parts.Length < 3 || !int.TryParse(parts[^2], out var chapter) || !int.TryParse(parts[^1], out var verse))
-                    continue;
-                var text = acc[id].ToString().Trim();
-                if (text.Length > 0)
-                    verses.Add(new PluginBibleVerse(bookName, chapter, verse, text));
-            }
-            return verses;
         }
         finally { inner?.Dispose(); }
+        return (order, acc);
     }
 
     private static void Collect(JsonElement node, Dictionary<string, StringBuilder> acc, List<string> order)
@@ -106,7 +166,6 @@ public static class ApiBibleParser
     private sealed record BibleDto(string Id, string? Name, string? Abbreviation, string? AbbreviationLocal, LanguageDto? Language);
     private sealed record LanguageDto(string? Id, string? Name);
     private sealed record BooksResponse(List<BookDto>? Data);
-    private sealed record BookDto(string Id, string? Name, string? Abbreviation, string? NameLong);
-    private sealed record ChaptersResponse(List<ChapterDto>? Data);
-    private sealed record ChapterDto(string Id, string? Number);
+    private sealed record BookDto(string Id, string? Name, string? Abbreviation, string? NameLong, List<ChapterSummaryDto>? Chapters);
+    private sealed record ChapterSummaryDto(string Id, string? Number, string? BookId);
 }

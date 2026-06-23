@@ -42,7 +42,7 @@ public class ApiBibleLiveTests
     }
 
     [Fact]
-    public async Task Parser_matches_real_chapter_shape_live()
+    public async Task Parser_matches_real_books_and_passage_shape_live()
     {
         if (string.IsNullOrWhiteSpace(Key)) return; // set APIBIBLE_KEY to run
 
@@ -52,21 +52,27 @@ public class ApiBibleLiveTests
         Assert.NotEmpty(versions);
         var versionId = versions[0].Id;
 
-        var books = ApiBibleParser.ParseBooks(await http.GetStringAsync($"bibles/{versionId}/books"));
+        // books?include-chapters=true must populate chapters inline (the per-book listing is gone).
+        var books = ApiBibleParser.ParseBooksWithChapters(
+            await http.GetStringAsync($"bibles/{versionId}/books?include-chapters=true"));
         Assert.NotEmpty(books);
+        Assert.All(books, b => Assert.NotEmpty(b.Chapters));
 
-        var chapters = ApiBibleParser
-            .ParseChapterRefs(await http.GetStringAsync($"bibles/{versionId}/books/{books[0].Code}/chapters"))
-            .Where(c => !string.Equals(c.Number, "intro", StringComparison.OrdinalIgnoreCase))
-            .ToList();
-        Assert.NotEmpty(chapters);
+        var chapters = books.SelectMany(b => b.Chapters).ToList();
+        var nameByCode = books.ToDictionary(b => b.Book.Code, b => b.Book.Name);
 
-        var chapterJson = await http.GetStringAsync(
-            $"bibles/{versionId}/chapters/{chapters[0].Id}?content-type=json&include-notes=false&include-titles=false");
-        var verses = ApiBibleParser.ParseChapterVerses(chapterJson, books[0].Name);
+        // One passage spanning the whole book range — confirms the real passage JSON shape (verseIds,
+        // verseCount) the walk relies on, including the 200-verse truncation signal.
+        var passageJson = await http.GetStringAsync(
+            $"bibles/{versionId}/passages/{chapters[0].Id}.1-{chapters[^1].Id}.1" +
+            "?content-type=json&include-notes=false&include-titles=false" +
+            "&include-chapter-numbers=false&include-verse-numbers=false&include-verse-spans=false");
+        var res = ApiBibleParser.ParsePassageVerses(passageJson, nameByCode);
 
-        Assert.NotEmpty(verses); // the parser understood the real chapter JSON
-        Assert.All(verses, v => Assert.False(string.IsNullOrWhiteSpace(v.Text)));
+        Assert.NotEmpty(res.Verses);
+        Assert.All(res.Verses, v => Assert.False(string.IsNullOrWhiteSpace(v.Text)));
+        Assert.True(res.VerseCount > 0);
+        Assert.NotNull(res.LastVerseId);
     }
 
     private sealed class TestHost(string apiKey, string baseUrl) : IPluginHost
