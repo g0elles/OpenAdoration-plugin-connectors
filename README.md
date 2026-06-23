@@ -15,11 +15,28 @@ version is the church's responsibility, under its own account and terms.
 3. Select the plugin, paste your API.Bible key into **API.Bible key**, **Save settings**.
 4. **Fetch versions**, tick the ones you want, **Import selected**.
 
+## Configuration
+
+- **API.Bible key** (required) — your key, masked in the UI.
+- **API base URL** (advanced, optional) — defaults to `https://rest.api.bible/v1/`. Set this only if
+  your account was issued a different host. Must include the version path (`/v1/`).
+
 ## Build
 
 ```powershell
 pwsh build.ps1            # -> dist/apibible.oaplugin
 ```
+
+## Tests
+
+```powershell
+dotnet test                           # parser unit tests (offline)
+$env:APIBIBLE_KEY="<your key>"; dotnet test   # also runs the live API checks
+```
+
+The live tests hit the real service to confirm the documented endpoints/JSON still match the parser.
+They are a no-op without `APIBIBLE_KEY`, so the key never lands in source or a transcript. Override the
+host with `APIBIBLE_BASE` if needed.
 
 The package contains only `manifest.json` + `OpenAdoration.Plugin.ApiBible.dll`. The contract
 assembly (`OpenAdoration.Plugins.Abstractions`) is **not** bundled — the host shares it from its own

@@ -6,6 +6,7 @@
   "minOaVersion": "2.0.0",
   "entryAssembly": "OpenAdoration.Plugin.ApiBible.dll",
   "settings": [
-    { "key": "apiKey", "label": "API.Bible key", "secret": true }
+    { "key": "apiKey", "label": "API.Bible key", "secret": true },
+    { "key": "baseUrl", "label": "API base URL (advanced — blank for default)", "secret": false }
   ]
 }

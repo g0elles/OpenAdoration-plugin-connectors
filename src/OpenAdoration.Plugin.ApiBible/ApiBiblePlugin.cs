@@ -13,7 +13,9 @@ namespace OpenAdoration.Plugin.ApiBible;
 /// </summary>
 public sealed class ApiBiblePlugin : IBibleSourcePlugin
 {
-    private const string BaseAddress = "https://api.scripture.api.bible/v1/";
+    // API.Bible's REST host. Configurable via the "baseUrl" setting (must include the /v1/ path);
+    // the church's account may be issued a different host.
+    private const string DefaultBaseAddress = "https://rest.api.bible/v1/";
 
     // 27 USFM codes for the New Testament; everything else is treated as Old Testament.
     private static readonly HashSet<string> NewTestament = new(StringComparer.OrdinalIgnoreCase)
@@ -33,9 +35,12 @@ public sealed class ApiBiblePlugin : IBibleSourcePlugin
     {
         _log = host.Logger;
         var apiKey = host.Settings.TryGetValue("apiKey", out var k) ? k?.Trim() : null;
+        var baseUrl = host.Settings.TryGetValue("baseUrl", out var b) && !string.IsNullOrWhiteSpace(b)
+            ? b.Trim() : DefaultBaseAddress;
+        if (!baseUrl.EndsWith('/')) baseUrl += "/";
 
         _http?.Dispose();
-        _http = new HttpClient { BaseAddress = new Uri(BaseAddress) };
+        _http = new HttpClient { BaseAddress = new Uri(baseUrl) };
         if (!string.IsNullOrWhiteSpace(apiKey))
             _http.DefaultRequestHeaders.Add("api-key", apiKey);
         else

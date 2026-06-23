@@ -45,21 +45,34 @@ public static class ApiBibleParser
             !data.TryGetProperty("content", out var content))
             return [];
 
-        var acc = new Dictionary<string, StringBuilder>();
-        var order = new List<string>();
-        Collect(content, acc, order);
-
-        var verses = new List<PluginBibleVerse>();
-        foreach (var id in order)
+        // API.Bible types `content` as a string but returns a native node array for content-type=json.
+        // Handle both: if it arrived JSON-encoded as a string, parse it again.
+        JsonDocument? inner = null;
+        try
         {
-            var parts = id.Split('.');
-            if (parts.Length < 3 || !int.TryParse(parts[^2], out var chapter) || !int.TryParse(parts[^1], out var verse))
-                continue;
-            var text = acc[id].ToString().Trim();
-            if (text.Length > 0)
-                verses.Add(new PluginBibleVerse(bookName, chapter, verse, text));
+            if (content.ValueKind == JsonValueKind.String)
+            {
+                inner = JsonDocument.Parse(content.GetString() ?? "[]");
+                content = inner.RootElement;
+            }
+
+            var acc = new Dictionary<string, StringBuilder>();
+            var order = new List<string>();
+            Collect(content, acc, order);
+
+            var verses = new List<PluginBibleVerse>();
+            foreach (var id in order)
+            {
+                var parts = id.Split('.');
+                if (parts.Length < 3 || !int.TryParse(parts[^2], out var chapter) || !int.TryParse(parts[^1], out var verse))
+                    continue;
+                var text = acc[id].ToString().Trim();
+                if (text.Length > 0)
+                    verses.Add(new PluginBibleVerse(bookName, chapter, verse, text));
+            }
+            return verses;
         }
-        return verses;
+        finally { inner?.Dispose(); }
     }
 
     private static void Collect(JsonElement node, Dictionary<string, StringBuilder> acc, List<string> order)
