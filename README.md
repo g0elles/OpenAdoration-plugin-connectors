@@ -9,7 +9,7 @@ ships no keys, telemetry, or copyrighted text.
 | Plugin | id | Source | Key? | Notes |
 |---|---|---|---|---|
 | **Free Use Bible** | `helloao` | [helloao.org](https://bible.helloao.org) | No | 1,000+ free / public-domain translations (incl. Spanish RVR1909). No limits; a whole Bible in one request. **Default free source.** |
-| **API.Bible** | `apibible` | [scripture.api.bible](https://scripture.api.bible) | Yes (BYO) | For the church's *licensed* versions (NVI, etc.) under its own key. Free tier is 5,000 calls/month; a whole version imports in ~160 calls (200-verse passage walk), so ~30 versions/month. |
+| **API.Bible** | `apibible` | [scripture.api.bible](https://scripture.api.bible) | Yes (BYO) | For the church's *licensed* versions (NVI, etc.) under its own key. Free tier is 5,000 calls/month; a whole version imports in ~160 calls (200-verse passage walk), so ~30 versions/month. Reports FUMS usage (fums.api.bible, separate host — no quota cost) per the API.Bible fair-use terms. |
 
 ## Install (per plugin)
 

@@ -144,6 +144,22 @@ public class ApiBibleParserTests
         Assert.Equal("Revelation", verses[^1].Book);
     }
 
+    [Fact]
+    public void BuildFumsUrls_batches_tokens_with_repeated_t_params()
+    {
+        var urls = ApiBiblePlugin.BuildFumsUrls(new[] { "a", "b", "c" }, "dev1", "sess1", 2).ToList();
+
+        Assert.Equal(2, urls.Count);
+        Assert.Equal("f3?dId=dev1&sId=sess1&t=a&t=b", urls[0]); // batch of 2
+        Assert.Equal("f3?dId=dev1&sId=sess1&t=c", urls[1]);     // remainder
+    }
+
+    [Fact]
+    public void BuildFumsUrls_empty_when_no_tokens()
+    {
+        Assert.Empty(ApiBiblePlugin.BuildFumsUrls([], "d", "s", 50));
+    }
+
     private static string Passage(int verseCount, params (string Id, string Text)[] nodes) =>
         "{\"data\":{\"verseCount\":" + verseCount + ",\"content\":[" + Nodes(nodes) + "]},\"meta\":{\"fumsToken\":\"x\"}}";
 
