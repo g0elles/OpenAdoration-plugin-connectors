@@ -14,6 +14,6 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-      - run: dotnet build OpenAdoration.ApiBible.slnx --configuration Release
-      # Live tests are gated on APIBIBLE_KEY (unset here) → only the offline unit tests run.
-      - run: dotnet test OpenAdoration.ApiBible.slnx --configuration Release --no-build
+      - run: dotnet build --configuration Release
+      # Live tests are gated on APIBIBLE_KEY (unset here) → only offline unit tests run.
+      - run: dotnet test --configuration Release --no-build

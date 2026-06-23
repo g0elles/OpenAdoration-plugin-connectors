@@ -1,8 +1,9 @@
 name: release
 
+# Per-plugin tags: "<id>-v<version>", e.g. apibible-v0.1.0 or helloao-v0.1.0.
 on:
   push:
-    tags: ['v*']
+    tags: ['*-v*']
 
 permissions:
   contents: write
@@ -15,10 +16,12 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-      - run: dotnet test OpenAdoration.ApiBible.slnx --configuration Release
+      - run: dotnet test --configuration Release
       - shell: pwsh
         run: ./build.ps1
+      - id: id
+        run: echo "id=${GITHUB_REF_NAME%-v*}" >> "$GITHUB_OUTPUT"
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/apibible.oaplugin
+          files: dist/${{ steps.id.outputs.id }}.oaplugin
           generate_release_notes: true

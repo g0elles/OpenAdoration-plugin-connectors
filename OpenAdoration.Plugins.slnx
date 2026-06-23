@@ -1,8 +1,10 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/OpenAdoration.Plugin.ApiBible/OpenAdoration.Plugin.ApiBible.csproj" />
+    <Project Path="src/OpenAdoration.Plugin.HelloAo/OpenAdoration.Plugin.HelloAo.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/OpenAdoration.Plugin.ApiBible.Tests/OpenAdoration.Plugin.ApiBible.Tests.csproj" />
+    <Project Path="tests/OpenAdoration.Plugin.HelloAo.Tests/OpenAdoration.Plugin.HelloAo.Tests.csproj" />
   </Folder>
 </Solution>

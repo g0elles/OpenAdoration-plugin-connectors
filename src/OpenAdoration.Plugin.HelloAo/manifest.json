@@ -1,0 +1,9 @@
+{
+  "id": "helloao",
+  "name": "Free Use Bible (helloao.org)",
+  "version": "0.1.0",
+  "capability": "bible-source",
+  "minOaVersion": "2.0.0",
+  "entryAssembly": "OpenAdoration.Plugin.HelloAo.dll",
+  "settings": []
+}
